@@ -1,12 +1,13 @@
 {
     "version": "0.2.0",
     "configurations": [
+        
         {
-            "name": "Run ticket_sim (10 1000 20)",
+            "name": "Run ticket_sim (interactive)",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}\\ticket_sim.exe",
-            "args": ["10", "1000"],
+            "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

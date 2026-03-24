@@ -12,7 +12,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "\n=== Rodando: .\\ticket_sim.exe 10 1000 ===\n"
-.\ticket_sim.exe 10 1000
+.\ticket_sim.exe 10 100000
 
 Write-Host "\n=== Rodando: .\\ticket_sim.exe 10 10000 ===\n"
 .\ticket_sim.exe 10 10000

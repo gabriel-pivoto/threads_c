@@ -19,6 +19,8 @@
 #define CLR_GRAY    "\x1b[90m"
 #define CLR_BOLD    "\x1b[1m"
 
+#define STOCK_NOT_AVAILABLE (-999999)
+
 /*
  * Local educational signature seed only.
  * This is NOT cryptography and must not be used in real systems.
@@ -54,8 +56,10 @@ typedef struct {
     int did_decrement;
     int did_ticket;
     int did_sign;
+    int stock_observed_before;
     long sale_id;
     int stock_after;
+    char worker_thread_name[32];
     char receipt[160];
     char signature[32];
 } thread_info_t;
@@ -127,12 +131,6 @@ static void toy_sign(const char *message, char out_hex[32]) {
     snprintf(out_hex, 32, "%016llx", (unsigned long long)sig);
 }
 
-static int toy_verify(const char *message, const char *signature_hex) {
-    char expected[32];
-    toy_sign(message, expected);
-    return strcmp(expected, signature_hex) == 0;
-}
-
 static void tiny_delay(unsigned seed, int stage) {
     unsigned mix = seed * 1103515245u + 12345u + (unsigned)(stage * 9973u);
     long us = 500 + (long)(mix % 6000);
@@ -193,10 +191,25 @@ static void issue_receipt(thread_info_t *info, long sale_id, int stock_after) {
     toy_sign(info->receipt, info->signature);
 }
 
+static const char *format_stock_value(int value, char *buffer, size_t buffer_len) {
+    if (value == STOCK_NOT_AVAILABLE) {
+        return "n/a";
+    }
+    snprintf(buffer, buffer_len, "%d", value);
+    return buffer;
+}
+
 static void *buyer_thread(void *arg) {
     thread_arg_t *targ = (thread_arg_t *)arg;
     simulation_ctx_t *ctx = targ->ctx;
     thread_info_t *info = targ->info;
+
+    snprintf(
+        info->worker_thread_name,
+        sizeof(info->worker_thread_name),
+        "thr-%llu",
+        (unsigned long long)(uintptr_t)pthread_self()
+    );
 
     set_state(info, ST_WAITING);
     barrier_wait(&ctx->start_barrier);
@@ -217,6 +230,7 @@ static void *buyer_thread(void *arg) {
      * producing oversell, negative stock, and inconsistent final state.
      */
     int snapshot = atomic_load(&ctx->tickets_remaining);
+    info->stock_observed_before = snapshot;
 
     set_state(info, ST_REQUESTING);
     info->did_request = 1;
@@ -245,6 +259,7 @@ static void *buyer_thread(void *arg) {
         set_state(info, ST_DONE_OK);
     } else {
         info->success = 0;
+        info->stock_after = STOCK_NOT_AVAILABLE;
         atomic_fetch_add(&ctx->fail_count, 1);
         set_state(info, ST_DONE_FAIL);
     }
@@ -289,72 +304,86 @@ static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
            done, ctx->cfg.threads);
         printf("Etapas por thread: CHK=verificou estoque | REQ=solicitou compra | DEC=descontou estoque | TKT=gerou ticket | SIG=gerou assinatura\n\n");
 
-    print_divider();
+    if (!final_frame) {
+        print_divider();
         printf("| Thread | State    | Result | CHK | REQ | DEC | TKT | SIG | Sale ID  | Receipt                           | Signature        |\n");
-    print_divider();
+        print_divider();
 
-    int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
+        int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
 
-    for (int i = 0; i < limit; i++) {
-        thread_info_t *info = &ctx->infos[i];
-        thread_state_t st = (thread_state_t)atomic_load(&info->state);
-        const char *color = state_color(st);
-        const char *result = info->success ? "OK" : (st == ST_DONE_FAIL ? "NO" : "...");
+        for (int i = 0; i < limit; i++) {
+            thread_info_t *info = &ctx->infos[i];
+            thread_state_t st = (thread_state_t)atomic_load(&info->state);
+            const char *color = state_color(st);
+            const char *result = info->success ? "OK" : (st == ST_DONE_FAIL ? "NO" : "...");
 
-         printf("| %sT%-5d%s | %s%-8s%s | %-6s |  %c  |  %c  |  %c  |  %c  |  %c  | %-8ld | %-33.33s | %-16.16s |\n",
-               CLR_BOLD, info->id, CLR_RESET,
-               color, state_name(st), CLR_RESET,
-               result,
-             info->did_check ? 'Y' : '-',
-             info->did_request ? 'Y' : '-',
-             info->did_decrement ? 'Y' : '-',
-             info->did_ticket ? 'Y' : '-',
-             info->did_sign ? 'Y' : '-',
-               info->sale_id,
-               info->receipt[0] ? info->receipt : "-",
-               info->signature[0] ? info->signature : "-");
-    }
+            printf("| %sT%-5d%s | %s%-8s%s | %-6s |  %c  |  %c  |  %c  |  %c  |  %c  | %-8ld | %-33.33s | %-16.16s |\n",
+                   CLR_BOLD, info->id, CLR_RESET,
+                   color, state_name(st), CLR_RESET,
+                   result,
+                   info->did_check ? 'Y' : '-',
+                   info->did_request ? 'Y' : '-',
+                   info->did_decrement ? 'Y' : '-',
+                   info->did_ticket ? 'Y' : '-',
+                   info->did_sign ? 'Y' : '-',
+                   info->sale_id,
+                   info->receipt[0] ? info->receipt : "-",
+                   info->signature[0] ? info->signature : "-");
+        }
 
-    print_divider();
-
-    if (ctx->cfg.threads > limit) {
-        printf("Mostrando %d de %d threads. As demais continuam participando normalmente no teste.\n",
-               limit, ctx->cfg.threads);
+        print_divider();
     }
 
     if (final_frame) {
-        int shown = 0;
-
-        printf("\nRecibos validados (amostra):\n");
-        for (int i = 0; i < ctx->cfg.threads && shown < 8; i++) {
-            if (ctx->infos[i].success) {
-                int ok = toy_verify(ctx->infos[i].receipt, ctx->infos[i].signature);
-
-                printf("  buyer T%05d | sale=%06ld | verify=%s%s%s | %s\n",
-                       ctx->infos[i].id,
-                       ctx->infos[i].sale_id,
-                       ok ? CLR_GREEN : CLR_RED,
-                       ok ? "VALID" : "INVALID",
-                       CLR_RESET,
-                       ctx->infos[i].receipt);
-                shown++;
-            }
+        printf("\n%s\n", "-----------------------------------------------------------------");
+        printf(" RESULT OF THE OPERATION: FLAWED_CONCURRENT\n");
+        printf("%s\n", "-----------------------------------------------------------------");
+        printf(" Buyers triggered         : %d\n", ctx->cfg.threads);
+        printf(" Successful purchases     : %d\n", sold);
+        printf(" Failed/Rejected attempts : %d\n", failed);
+        if (oversold > 0) {
+            printf(" OVERSOLD IN THIS BATCH   : %d tickets!\n", oversold);
         }
+        printf(" Current remaining stock  : %d\n", remaining);
+
+        printf("%s\n", "-----------------------------------------------------------------");
+        printf(" DETAILED BUYER ACTIVITY\n");
+        printf("%s\n", "-----------------------------------------------------------------");
+        printf("%-10s %-16s %-10s %-12s %-11s\n",
+               "Buyer", "Thread", "Saw stock", "Proof Token", "Stock after");
+        printf("%s\n", "-----------------------------------------------------------------");
+
+        int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
+        for (int i = 0; i < limit; i++) {
+            thread_info_t *attempt = &ctx->infos[i];
+            char buyer_id[16];
+            char saw_stock[16];
+            char stock_after_text[16];
+            char token[13];
+
+            snprintf(buyer_id, sizeof(buyer_id), "B%05d", attempt->id);
+            if (attempt->signature[0]) {
+                memcpy(token, attempt->signature, 12);
+                token[12] = '\0';
+            } else {
+                strcpy(token, "-");
+            }
+
+            printf("%-10s %-16s %-10s %-12s %-11s\n",
+                   buyer_id,
+                   attempt->worker_thread_name,
+                   format_stock_value(attempt->stock_observed_before, saw_stock, sizeof(saw_stock)),
+                   token,
+                   format_stock_value(attempt->stock_after, stock_after_text, sizeof(stock_after_text)));
+        }
+        printf("%s\n", "-----------------------------------------------------------------");
 
         printf("\nResumo final:\n");
-        if (oversold > 0) {
-            printf(CLR_RED "  Falha demonstrada: flawed_sync vendeu %d ticket(s) além do limite." CLR_RESET "\n", oversold);
-            printf("  Causa: sincronização arquiteturalmente incorreta (snapshot stale / invariante dividida).\n");
-        } else {
-            printf(CLR_YELLOW "  Nesta execução não houve oversell. Rode novamente ou aumente as threads." CLR_RESET "\n");
-            printf("  A ausência de oversell em uma execução não valida o desenho; o padrão continua incorreto.\n");
-        }
-
-        printf("  Observação: a assinatura acima é apenas didática e local ao simulador (não é cripto real).\n");
-        printf("  Ela prova apenas que este simulador local aceitou a compra, mesmo quando o estado é inválido.\n");
-        printf("  Tese didática: alto volume de threads expõe falhas de sincronização; não quebra um desenho correto por si só.\n");
-        printf("  FINAL_METRICS mode=flawed_sync tickets=%d threads=%d sold=%d failed=%d remaining=%d oversold=%d\n",
-               ctx->cfg.tickets, ctx->cfg.threads, sold, failed, remaining, oversold);
+        printf(" Threads: %d\n", ctx->cfg.threads);
+        printf(" Compras: %d\n", sold);
+        printf(" Oversold: %d\n", oversold);
+        printf(" Compras falharam: %d\n", failed);
+        printf(" Estoque restante: %d\n", remaining);
     }
 
     fflush(stdout);
@@ -400,8 +429,10 @@ int run_simulation(const sim_config_t *cfg) {
         ctx.infos[i].did_decrement = 0;
         ctx.infos[i].did_ticket = 0;
         ctx.infos[i].did_sign = 0;
+        ctx.infos[i].stock_observed_before = STOCK_NOT_AVAILABLE;
         ctx.infos[i].sale_id = 0;
-        ctx.infos[i].stock_after = 0;
+        ctx.infos[i].stock_after = STOCK_NOT_AVAILABLE;
+        ctx.infos[i].worker_thread_name[0] = '\0';
         ctx.infos[i].receipt[0] = '\0';
         ctx.infos[i].signature[0] = '\0';
 

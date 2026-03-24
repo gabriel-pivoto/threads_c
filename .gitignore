@@ -1,0 +1,39 @@
+# Executáveis e bibliotecas
+*.exe
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Arquivos de saída/logs
+*.txt
+*.log
+_*
+
+# Arquivos do VS Code / debugger
+.vscode/
+*.dSYM/
+*.su
+*.gch
+*.pch
+
+# Arquivos do Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+.venv/
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Make
+.PHONY
+*.d
