@@ -1,0 +1,409 @@
+#define _POSIX_C_SOURCE 200809L
+#include "ticket_system.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdatomic.h>
+
+#define CLR_RESET   "\x1b[0m"
+#define CLR_RED     "\x1b[31m"
+#define CLR_GREEN   "\x1b[32m"
+#define CLR_YELLOW  "\x1b[33m"
+#define CLR_BLUE    "\x1b[34m"
+#define CLR_MAGENTA "\x1b[35m"
+#define CLR_CYAN    "\x1b[36m"
+#define CLR_GRAY    "\x1b[90m"
+#define CLR_BOLD    "\x1b[1m"
+
+/*
+ * Local educational signature seed only.
+ * This is NOT cryptography and must not be used in real systems.
+ */
+#define SECRET_KEY "LAB_ONLY_SECRET_DO_NOT_USE_IN_REAL_SYSTEMS"
+
+typedef enum {
+    ST_CREATED = 0,
+    ST_WAITING,
+    ST_CHECKING,
+    ST_REQUESTING,
+    ST_ISSUING,
+    ST_DONE_OK,
+    ST_DONE_FAIL
+} thread_state_t;
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int total;
+    int arrived;
+    int generation;
+} simple_barrier_t;
+
+typedef struct {
+    int id;
+    atomic_int state;
+    int success;
+    long sale_id;
+    int stock_after;
+    char receipt[160];
+    char signature[32];
+} thread_info_t;
+
+typedef struct {
+    sim_config_t cfg;
+
+    atomic_int tickets_remaining;
+    atomic_int success_count;
+    atomic_int fail_count;
+    atomic_int done_count;
+    atomic_long sale_counter;
+
+    simple_barrier_t start_barrier;
+
+    thread_info_t *infos;
+    pthread_t *threads;
+} simulation_ctx_t;
+
+typedef struct {
+    simulation_ctx_t *ctx;
+    thread_info_t *info;
+} thread_arg_t;
+
+static void barrier_init(simple_barrier_t *b, int total) {
+    pthread_mutex_init(&b->mutex, NULL);
+    pthread_cond_init(&b->cond, NULL);
+    b->total = total;
+    b->arrived = 0;
+    b->generation = 0;
+}
+
+static void barrier_destroy(simple_barrier_t *b) {
+    pthread_mutex_destroy(&b->mutex);
+    pthread_cond_destroy(&b->cond);
+}
+
+static void barrier_wait(simple_barrier_t *b) {
+    pthread_mutex_lock(&b->mutex);
+    int gen = b->generation;
+    b->arrived++;
+
+    if (b->arrived == b->total) {
+        b->generation++;
+        b->arrived = 0;
+        pthread_cond_broadcast(&b->cond);
+    } else {
+        while (gen == b->generation) {
+            pthread_cond_wait(&b->cond, &b->mutex);
+        }
+    }
+
+    pthread_mutex_unlock(&b->mutex);
+}
+
+static uint64_t fnv1a64_bytes(const unsigned char *data, size_t len) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (uint64_t)data[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static void toy_sign(const char *message, char out_hex[32]) {
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "%s|%s", SECRET_KEY, message);
+    uint64_t sig = fnv1a64_bytes((const unsigned char *)buffer, strlen(buffer));
+    snprintf(out_hex, 32, "%016llx", (unsigned long long)sig);
+}
+
+static int toy_verify(const char *message, const char *signature_hex) {
+    char expected[32];
+    toy_sign(message, expected);
+    return strcmp(expected, signature_hex) == 0;
+}
+
+static void tiny_delay(unsigned seed, int stage) {
+    unsigned mix = seed * 1103515245u + 12345u + (unsigned)(stage * 9973u);
+    long us = 500 + (long)(mix % 6000);
+
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = us * 1000L;
+    nanosleep(&ts, NULL);
+}
+
+static const char *state_name(thread_state_t st) {
+    switch (st) {
+        case ST_CREATED: return "CREATED";
+        case ST_WAITING: return "WAITING";
+        case ST_CHECKING: return "CHECKING";
+        case ST_REQUESTING: return "REQUESTING";
+        case ST_ISSUING: return "ISSUING";
+        case ST_DONE_OK: return "SUCCESS";
+        case ST_DONE_FAIL: return "FAILED";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *state_color(thread_state_t st) {
+    switch (st) {
+        case ST_CREATED: return CLR_GRAY;
+        case ST_WAITING: return CLR_BLUE;
+        case ST_CHECKING: return CLR_CYAN;
+        case ST_REQUESTING: return CLR_YELLOW;
+        case ST_ISSUING: return CLR_MAGENTA;
+        case ST_DONE_OK: return CLR_GREEN;
+        case ST_DONE_FAIL: return CLR_RED;
+        default: return CLR_RESET;
+    }
+}
+
+static void set_state(thread_info_t *info, thread_state_t st) {
+    atomic_store(&info->state, st);
+}
+
+static void issue_receipt(thread_info_t *info, long sale_id, int stock_after) {
+    info->sale_id = sale_id;
+    info->stock_after = stock_after;
+
+    snprintf(
+        info->receipt,
+        sizeof(info->receipt),
+        "buyer=T%05d;sale=%06ld;stock_after=%d",
+        info->id,
+        sale_id,
+        stock_after
+    );
+
+    toy_sign(info->receipt, info->signature);
+}
+
+static void *buyer_thread(void *arg) {
+    thread_arg_t *targ = (thread_arg_t *)arg;
+    simulation_ctx_t *ctx = targ->ctx;
+    thread_info_t *info = targ->info;
+
+    set_state(info, ST_WAITING);
+    barrier_wait(&ctx->start_barrier);
+
+    set_state(info, ST_CHECKING);
+    tiny_delay((unsigned)info->id, 1);
+
+    /*
+     * INTENTIONAL RACE (didactic): stale snapshot / split invariant.
+     *
+     * Step 1: thread reads shared stock into local snapshot.
+     * Step 2: after delay, thread decides based on stale value.
+     * Step 3: accepted threads decrement shared stock in a later operation.
+     *
+     * Because there is no end-to-end synchronization covering check+decrement,
+     * many threads can observe snapshot > 0 and still issue concurrent sales,
+     * producing oversell, negative stock, and inconsistent final state.
+     */
+    int snapshot = atomic_load(&ctx->tickets_remaining);
+
+    set_state(info, ST_REQUESTING);
+    tiny_delay((unsigned)info->id, 2);
+
+    if (snapshot > 0) {
+        set_state(info, ST_ISSUING);
+        tiny_delay((unsigned)info->id, 3);
+
+        int stock_after = atomic_fetch_sub(&ctx->tickets_remaining, 1) - 1;
+        long sale_id = atomic_fetch_add(&ctx->sale_counter, 1) + 1;
+
+        info->success = 1;
+        issue_receipt(info, sale_id, stock_after);
+        atomic_fetch_add(&ctx->success_count, 1);
+        set_state(info, ST_DONE_OK);
+    } else {
+        info->success = 0;
+        atomic_fetch_add(&ctx->fail_count, 1);
+        set_state(info, ST_DONE_FAIL);
+    }
+
+    atomic_fetch_add(&ctx->done_count, 1);
+    return NULL;
+}
+
+static void count_states(simulation_ctx_t *ctx, int *out, int n) {
+    for (int i = 0; i < n; i++) out[i] = 0;
+
+    for (int i = 0; i < ctx->cfg.threads; i++) {
+        int st = atomic_load(&ctx->infos[i].state);
+        if (st >= 0 && st < n) out[st]++;
+    }
+}
+
+static void print_divider(void) {
+    printf("+--------+------------+---------+----------+-------------------------------------------+------------------+\n");
+}
+
+static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
+    int counts[7];
+    count_states(ctx, counts, 7);
+
+    int remaining = atomic_load(&ctx->tickets_remaining);
+    int sold = atomic_load(&ctx->success_count);
+    int failed = atomic_load(&ctx->fail_count);
+    int done = atomic_load(&ctx->done_count);
+    int oversold = sold > ctx->cfg.tickets ? sold - ctx->cfg.tickets : 0;
+
+    printf("\x1b[H\x1b[J");
+    printf(CLR_BOLD "Ticket Race Simulator (intentionally flawed concurrent mode)" CLR_RESET "\n");
+
+    printf("Tickets iniciais: %d | Threads: %d | Restantes: %d | Vendidos: %d | Falhas: %d | Oversold: %d\n",
+           ctx->cfg.tickets, ctx->cfg.threads, remaining, sold, failed, oversold);
+
+    printf("Estados -> waiting:%d checking:%d requesting:%d issuing:%d success:%d failed:%d | done:%d/%d\n\n",
+           counts[ST_WAITING], counts[ST_CHECKING], counts[ST_REQUESTING],
+           counts[ST_ISSUING], counts[ST_DONE_OK], counts[ST_DONE_FAIL],
+           done, ctx->cfg.threads);
+
+    print_divider();
+    printf("| Thread | State      | Result  | Sale ID  | Receipt                                   | Signature        |\n");
+    print_divider();
+
+    int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
+
+    for (int i = 0; i < limit; i++) {
+        thread_info_t *info = &ctx->infos[i];
+        thread_state_t st = (thread_state_t)atomic_load(&info->state);
+        const char *color = state_color(st);
+        const char *result = info->success ? "OK" : (st == ST_DONE_FAIL ? "NO" : "...");
+
+        printf("| %sT%-5d%s | %s%-10s%s | %-7s | %-8ld | %-41.41s | %-16.16s |\n",
+               CLR_BOLD, info->id, CLR_RESET,
+               color, state_name(st), CLR_RESET,
+               result,
+               info->sale_id,
+               info->receipt[0] ? info->receipt : "-",
+               info->signature[0] ? info->signature : "-");
+    }
+
+    print_divider();
+
+    if (ctx->cfg.threads > limit) {
+        printf("Mostrando %d de %d threads. As demais continuam participando normalmente no teste.\n",
+               limit, ctx->cfg.threads);
+    }
+
+    if (final_frame) {
+        int shown = 0;
+
+        printf("\nRecibos validados (amostra):\n");
+        for (int i = 0; i < ctx->cfg.threads && shown < 8; i++) {
+            if (ctx->infos[i].success) {
+                int ok = toy_verify(ctx->infos[i].receipt, ctx->infos[i].signature);
+
+                printf("  buyer T%05d | sale=%06ld | verify=%s%s%s | %s\n",
+                       ctx->infos[i].id,
+                       ctx->infos[i].sale_id,
+                       ok ? CLR_GREEN : CLR_RED,
+                       ok ? "VALID" : "INVALID",
+                       CLR_RESET,
+                       ctx->infos[i].receipt);
+                shown++;
+            }
+        }
+
+        printf("\nResumo final:\n");
+        if (oversold > 0) {
+            printf(CLR_RED "  Falha demonstrada: flawed_sync vendeu %d ticket(s) além do limite." CLR_RESET "\n", oversold);
+            printf("  Causa: sincronização arquiteturalmente incorreta (snapshot stale / invariante dividida).\n");
+        } else {
+            printf(CLR_YELLOW "  Nesta execução não houve oversell. Rode novamente ou aumente as threads." CLR_RESET "\n");
+            printf("  A ausência de oversell em uma execução não valida o desenho; o padrão continua incorreto.\n");
+        }
+
+        printf("  Observação: a assinatura acima é apenas didática e local ao simulador (não é cripto real).\n");
+        printf("  Ela prova apenas que este simulador local aceitou a compra, mesmo quando o estado é inválido.\n");
+        printf("  Tese didática: alto volume de threads expõe falhas de sincronização; não quebra um desenho correto por si só.\n");
+        printf("  FINAL_METRICS mode=flawed_sync tickets=%d threads=%d sold=%d failed=%d remaining=%d oversold=%d\n",
+               ctx->cfg.tickets, ctx->cfg.threads, sold, failed, remaining, oversold);
+    }
+
+    fflush(stdout);
+}
+
+int run_simulation(const sim_config_t *cfg) {
+    if (!cfg || cfg->tickets <= 0 || cfg->threads <= 0 || cfg->rows_to_show <= 0) {
+        fprintf(stderr, "Configuração inválida.\n");
+        return 1;
+    }
+
+    simulation_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.cfg = *cfg;
+
+    atomic_init(&ctx.tickets_remaining, cfg->tickets);
+    atomic_init(&ctx.success_count, 0);
+    atomic_init(&ctx.fail_count, 0);
+    atomic_init(&ctx.done_count, 0);
+    atomic_init(&ctx.sale_counter, 0);
+
+    barrier_init(&ctx.start_barrier, cfg->threads);
+
+    ctx.infos = calloc((size_t)cfg->threads, sizeof(thread_info_t));
+    ctx.threads = calloc((size_t)cfg->threads, sizeof(pthread_t));
+    thread_arg_t *args = calloc((size_t)cfg->threads, sizeof(thread_arg_t));
+
+    if (!ctx.infos || !ctx.threads || !args) {
+        fprintf(stderr, "Falha ao alocar memória.\n");
+        free(ctx.infos);
+        free(ctx.threads);
+        free(args);
+        barrier_destroy(&ctx.start_barrier);
+        return 1;
+    }
+
+    for (int i = 0; i < cfg->threads; i++) {
+        ctx.infos[i].id = i + 1;
+        atomic_init(&ctx.infos[i].state, ST_CREATED);
+        ctx.infos[i].success = 0;
+        ctx.infos[i].sale_id = 0;
+        ctx.infos[i].stock_after = 0;
+        ctx.infos[i].receipt[0] = '\0';
+        ctx.infos[i].signature[0] = '\0';
+
+        args[i].ctx = &ctx;
+        args[i].info = &ctx.infos[i];
+    }
+
+    printf("\x1b[?25l");
+
+    for (int i = 0; i < cfg->threads; i++) {
+        if (pthread_create(&ctx.threads[i], NULL, buyer_thread, &args[i]) != 0) {
+            fprintf(stderr, "Falha ao criar thread %d.\n", i + 1);
+            ctx.cfg.threads = i;
+            break;
+        }
+    }
+
+    while (atomic_load(&ctx.done_count) < ctx.cfg.threads) {
+        render_dashboard(&ctx, 0);
+
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 80000000L;
+        nanosleep(&ts, NULL);
+    }
+
+    for (int i = 0; i < ctx.cfg.threads; i++) {
+        pthread_join(ctx.threads[i], NULL);
+    }
+
+    render_dashboard(&ctx, 1);
+    printf("\x1b[?25h");
+
+    free(ctx.infos);
+    free(ctx.threads);
+    free(args);
+    barrier_destroy(&ctx.start_barrier);
+
+    return 0;
+}
