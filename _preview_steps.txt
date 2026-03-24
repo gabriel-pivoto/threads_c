@@ -1,0 +1,89 @@
+﻿[?25l[H[J[1mTicket Race Simulator (intentionally flawed concurrent mode)[0m
+Tickets iniciais: 10 | Threads: 60 | Restantes: 10 | Vendidos: 0 | Falhas: 0 | Oversold: 0
+Estados -> waiting:7 checking:0 request:0 decrement:0 ticket:0 signing:0 success:0 failed:0 | done:0/60
+Etapas por thread: CHK=verificou estoque | REQ=solicitou compra | DEC=descontou estoque | TKT=gerou ticket | SIG=gerou assinatura
+
++--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+
+| Thread | State    | Result | CHK | REQ | DEC | TKT | SIG | Sale ID  | Receipt                           | Signature        |
++--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+
+| [1mT1    [0m | [34mWAITING [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT2    [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT3    [0m | [34mWAITING [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT4    [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT5    [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT6    [0m | [34mWAITING [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT7    [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT8    [0m | [34mWAITING [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT9    [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT10   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT11   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT12   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT13   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT14   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT15   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT16   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT17   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT18   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT19   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT20   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT21   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT22   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT23   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT24   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
+| [1mT25   [0m | [90mCREATED [0m | ...    |  -  |  -  |  -  |  -  |  -  | 0        | -                                 | -                |
++--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+
+Mostrando 25 de 60 threads. As demais continuam participando normalmente no teste.
+[H[J[1mTicket Race Simulator (intentionally flawed concurrent mode)[0m
+Tickets iniciais: 10 | Threads: 60 | Restantes: -50 | Vendidos: 60 | Falhas: 0 | Oversold: 50
+Estados -> waiting:0 checking:0 request:0 decrement:0 ticket:0 signing:0 success:60 failed:0 | done:60/60
+Etapas por thread: CHK=verificou estoque | REQ=solicitou compra | DEC=descontou estoque | TKT=gerou ticket | SIG=gerou assinatura
+
++--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+
+| Thread | State    | Result | CHK | REQ | DEC | TKT | SIG | Sale ID  | Receipt                           | Signature        |
++--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+
+| [1mT1    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 33       | buyer=T00001;sale=000033;stock_af | 23c9a4b5cfb359dd |
+| [1mT2    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 60       | buyer=T00002;sale=000060;stock_af | a5cb7c85ddcccd37 |
+| [1mT3    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 7        | buyer=T00003;sale=000007;stock_af | c78c53c6abadcfb6 |
+| [1mT4    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 15       | buyer=T00004;sale=000015;stock_af | 1ce18ad44c985aca |
+| [1mT5    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 35       | buyer=T00005;sale=000035;stock_af | 92725d79b6895408 |
+| [1mT6    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 10       | buyer=T00006;sale=000010;stock_af | e871e14bb15d8cf4 |
+| [1mT7    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 27       | buyer=T00007;sale=000027;stock_af | 0ac8d81173ed7ad1 |
+| [1mT8    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 45       | buyer=T00008;sale=000045;stock_af | 7abf6d112dd940c9 |
+| [1mT9    [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 57       | buyer=T00009;sale=000057;stock_af | 368052695e76d73d |
+| [1mT10   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 14       | buyer=T00010;sale=000014;stock_af | af76020fc71d18ed |
+| [1mT11   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 19       | buyer=T00011;sale=000019;stock_af | e4b62d15d475ea15 |
+| [1mT12   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 23       | buyer=T00012;sale=000023;stock_af | aad30ed36c645ca0 |
+| [1mT13   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 40       | buyer=T00013;sale=000040;stock_af | 036d52d4be6d2d08 |
+| [1mT14   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 54       | buyer=T00014;sale=000054;stock_af | 10541c94aac6351b |
+| [1mT15   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 52       | buyer=T00015;sale=000052;stock_af | 1314a65438313775 |
+| [1mT16   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 17       | buyer=T00016;sale=000017;stock_af | e21a502f5aa0bcae |
+| [1mT17   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 2        | buyer=T00017;sale=000002;stock_af | 933bf0382a5ee607 |
+| [1mT18   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 39       | buyer=T00018;sale=000039;stock_af | 460b4aa721a146b7 |
+| [1mT19   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 30       | buyer=T00019;sale=000030;stock_af | 860f06cfcadf22ce |
+| [1mT20   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 49       | buyer=T00020;sale=000049;stock_af | dbbcebf93b46d8c6 |
+| [1mT21   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 47       | buyer=T00021;sale=000047;stock_af | 81a540eeafbea89f |
+| [1mT22   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 43       | buyer=T00022;sale=000043;stock_af | 5ca7fbb3e86a0184 |
+| [1mT23   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 13       | buyer=T00023;sale=000013;stock_af | 5e2eb2249b842cab |
+| [1mT24   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 11       | buyer=T00024;sale=000011;stock_af | accaaa9025a67b56 |
+| [1mT25   [0m | [32mSUCCESS [0m | OK     |  Y  |  Y  |  Y  |  Y  |  Y  | 24       | buyer=T00025;sale=000024;stock_af | a4f1a33feb7813f3 |
++--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+
+Mostrando 25 de 60 threads. As demais continuam participando normalmente no teste.
+
+Recibos validados (amostra):
+  buyer T00001 | sale=000033 | verify=[32mVALID[0m | buyer=T00001;sale=000033;stock_after=-16
+  buyer T00002 | sale=000060 | verify=[32mVALID[0m | buyer=T00002;sale=000060;stock_after=-13
+  buyer T00003 | sale=000007 | verify=[32mVALID[0m | buyer=T00003;sale=000007;stock_after=6
+  buyer T00004 | sale=000015 | verify=[32mVALID[0m | buyer=T00004;sale=000015;stock_after=-45
+  buyer T00005 | sale=000035 | verify=[32mVALID[0m | buyer=T00005;sale=000035;stock_after=-39
+  buyer T00006 | sale=000010 | verify=[32mVALID[0m | buyer=T00006;sale=000010;stock_after=1
+  buyer T00007 | sale=000027 | verify=[32mVALID[0m | buyer=T00007;sale=000027;stock_after=-6
+  buyer T00008 | sale=000045 | verify=[32mVALID[0m | buyer=T00008;sale=000045;stock_after=-29
+
+Resumo final:
+[31m  Falha demonstrada: flawed_sync vendeu 50 ticket(s) al├⌐m do limite.[0m
+  Causa: sincroniza├º├úo arquiteturalmente incorreta (snapshot stale / invariante dividida).
+  Observa├º├úo: a assinatura acima ├⌐ apenas did├ítica e local ao simulador (n├úo ├⌐ cripto real).
+  Ela prova apenas que este simulador local aceitou a compra, mesmo quando o estado ├⌐ inv├ílido.
+  Tese did├ítica: alto volume de threads exp├╡e falhas de sincroniza├º├úo; n├úo quebra um desenho correto por si s├│.
+  FINAL_METRICS mode=flawed_sync tickets=10 threads=60 sold=60 failed=0 remaining=-50 oversold=50
+[?25h

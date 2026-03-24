@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
     sim_config_t cfg;
     cfg.tickets = atoi(argv[1]);
     cfg.threads = atoi(argv[2]);
-    cfg.rows_to_show = (argc == 4) ? atoi(argv[3]) : 20;
+    cfg.rows_to_show = (argc == 4) ? atoi(argv[3]) : cfg.threads;
 
     return run_simulation(&cfg);
 }

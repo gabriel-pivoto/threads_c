@@ -6,7 +6,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}\\ticket_sim.exe",
-            "args": ["10", "1000", "20"],
+            "args": ["10", "1000"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

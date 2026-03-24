@@ -30,7 +30,9 @@ typedef enum {
     ST_WAITING,
     ST_CHECKING,
     ST_REQUESTING,
-    ST_ISSUING,
+    ST_DECREMENTING,
+    ST_TICKETING,
+    ST_SIGNING,
     ST_DONE_OK,
     ST_DONE_FAIL
 } thread_state_t;
@@ -47,6 +49,11 @@ typedef struct {
     int id;
     atomic_int state;
     int success;
+    int did_check;
+    int did_request;
+    int did_decrement;
+    int did_ticket;
+    int did_sign;
     long sale_id;
     int stock_after;
     char receipt[160];
@@ -142,7 +149,9 @@ static const char *state_name(thread_state_t st) {
         case ST_WAITING: return "WAITING";
         case ST_CHECKING: return "CHECKING";
         case ST_REQUESTING: return "REQUESTING";
-        case ST_ISSUING: return "ISSUING";
+        case ST_DECREMENTING: return "DECR";
+        case ST_TICKETING: return "TICKET";
+        case ST_SIGNING: return "SIGNING";
         case ST_DONE_OK: return "SUCCESS";
         case ST_DONE_FAIL: return "FAILED";
         default: return "UNKNOWN";
@@ -155,7 +164,9 @@ static const char *state_color(thread_state_t st) {
         case ST_WAITING: return CLR_BLUE;
         case ST_CHECKING: return CLR_CYAN;
         case ST_REQUESTING: return CLR_YELLOW;
-        case ST_ISSUING: return CLR_MAGENTA;
+        case ST_DECREMENTING: return CLR_RED;
+        case ST_TICKETING: return CLR_MAGENTA;
+        case ST_SIGNING: return CLR_BLUE;
         case ST_DONE_OK: return CLR_GREEN;
         case ST_DONE_FAIL: return CLR_RED;
         default: return CLR_RESET;
@@ -191,6 +202,7 @@ static void *buyer_thread(void *arg) {
     barrier_wait(&ctx->start_barrier);
 
     set_state(info, ST_CHECKING);
+    info->did_check = 1;
     tiny_delay((unsigned)info->id, 1);
 
     /*
@@ -207,17 +219,28 @@ static void *buyer_thread(void *arg) {
     int snapshot = atomic_load(&ctx->tickets_remaining);
 
     set_state(info, ST_REQUESTING);
+    info->did_request = 1;
     tiny_delay((unsigned)info->id, 2);
 
     if (snapshot > 0) {
-        set_state(info, ST_ISSUING);
+        set_state(info, ST_DECREMENTING);
         tiny_delay((unsigned)info->id, 3);
 
+        info->did_decrement = 1;
         int stock_after = atomic_fetch_sub(&ctx->tickets_remaining, 1) - 1;
+
+        set_state(info, ST_TICKETING);
+        tiny_delay((unsigned)info->id, 3);
+
         long sale_id = atomic_fetch_add(&ctx->sale_counter, 1) + 1;
+        info->did_ticket = 1;
+
+        set_state(info, ST_SIGNING);
+        tiny_delay((unsigned)info->id, 4);
 
         info->success = 1;
         issue_receipt(info, sale_id, stock_after);
+        info->did_sign = 1;
         atomic_fetch_add(&ctx->success_count, 1);
         set_state(info, ST_DONE_OK);
     } else {
@@ -240,12 +263,12 @@ static void count_states(simulation_ctx_t *ctx, int *out, int n) {
 }
 
 static void print_divider(void) {
-    printf("+--------+------------+---------+----------+-------------------------------------------+------------------+\n");
+    printf("+--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+\n");
 }
 
 static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
-    int counts[7];
-    count_states(ctx, counts, 7);
+    int counts[10];
+    count_states(ctx, counts, 10);
 
     int remaining = atomic_load(&ctx->tickets_remaining);
     int sold = atomic_load(&ctx->success_count);
@@ -259,13 +282,15 @@ static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
     printf("Tickets iniciais: %d | Threads: %d | Restantes: %d | Vendidos: %d | Falhas: %d | Oversold: %d\n",
            ctx->cfg.tickets, ctx->cfg.threads, remaining, sold, failed, oversold);
 
-    printf("Estados -> waiting:%d checking:%d requesting:%d issuing:%d success:%d failed:%d | done:%d/%d\n\n",
+        printf("Estados -> waiting:%d checking:%d request:%d decrement:%d ticket:%d signing:%d success:%d failed:%d | done:%d/%d\n",
            counts[ST_WAITING], counts[ST_CHECKING], counts[ST_REQUESTING],
-           counts[ST_ISSUING], counts[ST_DONE_OK], counts[ST_DONE_FAIL],
+            counts[ST_DECREMENTING], counts[ST_TICKETING], counts[ST_SIGNING],
+            counts[ST_DONE_OK], counts[ST_DONE_FAIL],
            done, ctx->cfg.threads);
+        printf("Etapas por thread: CHK=verificou estoque | REQ=solicitou compra | DEC=descontou estoque | TKT=gerou ticket | SIG=gerou assinatura\n\n");
 
     print_divider();
-    printf("| Thread | State      | Result  | Sale ID  | Receipt                                   | Signature        |\n");
+        printf("| Thread | State    | Result | CHK | REQ | DEC | TKT | SIG | Sale ID  | Receipt                           | Signature        |\n");
     print_divider();
 
     int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
@@ -276,10 +301,15 @@ static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
         const char *color = state_color(st);
         const char *result = info->success ? "OK" : (st == ST_DONE_FAIL ? "NO" : "...");
 
-        printf("| %sT%-5d%s | %s%-10s%s | %-7s | %-8ld | %-41.41s | %-16.16s |\n",
+         printf("| %sT%-5d%s | %s%-8s%s | %-6s |  %c  |  %c  |  %c  |  %c  |  %c  | %-8ld | %-33.33s | %-16.16s |\n",
                CLR_BOLD, info->id, CLR_RESET,
                color, state_name(st), CLR_RESET,
                result,
+             info->did_check ? 'Y' : '-',
+             info->did_request ? 'Y' : '-',
+             info->did_decrement ? 'Y' : '-',
+             info->did_ticket ? 'Y' : '-',
+             info->did_sign ? 'Y' : '-',
                info->sale_id,
                info->receipt[0] ? info->receipt : "-",
                info->signature[0] ? info->signature : "-");
@@ -365,6 +395,11 @@ int run_simulation(const sim_config_t *cfg) {
         ctx.infos[i].id = i + 1;
         atomic_init(&ctx.infos[i].state, ST_CREATED);
         ctx.infos[i].success = 0;
+        ctx.infos[i].did_check = 0;
+        ctx.infos[i].did_request = 0;
+        ctx.infos[i].did_decrement = 0;
+        ctx.infos[i].did_ticket = 0;
+        ctx.infos[i].did_sign = 0;
         ctx.infos[i].sale_id = 0;
         ctx.infos[i].stock_after = 0;
         ctx.infos[i].receipt[0] = '\0';
