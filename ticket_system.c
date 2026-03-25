@@ -259,31 +259,50 @@ static void *buyer_thread(void *arg) {
     if (snapshot > 0) {
         atomic_store(&info->exec_state, (int)EXEC_DECREMENTING);
         tiny_delay((unsigned)info->id, 3);
+        int stock_after = STOCK_NOT_AVAILABLE;
+        int expected = atomic_load(&ctx->tickets_remaining);
+        int reserved = 0;
 
-        info->did_decrement = 1;
-        int stock_after = atomic_fetch_sub(&ctx->tickets_remaining, 1) - 1;
-        add_event(ctx, "%s decremented to %d", info->worker_thread_name, stock_after);
+        while (expected > 0) {
+            if (atomic_compare_exchange_weak(&ctx->tickets_remaining, &expected, expected - 1)) {
+                reserved = 1;
+                stock_after = expected - 1;
+                break;
+            }
+        }
 
-        atomic_store(&info->exec_state, (int)EXEC_TICKETING);
-        tiny_delay((unsigned)info->id, 3);
+        if (reserved) {
+            info->did_decrement = 1;
+            add_event(ctx, "%s decremented to %d", info->worker_thread_name, stock_after);
 
-        long sale_id = atomic_fetch_add(&ctx->sale_counter, 1) + 1;
-        info->did_ticket = 1;
+            atomic_store(&info->exec_state, (int)EXEC_TICKETING);
+            tiny_delay((unsigned)info->id, 3);
 
-        atomic_store(&info->exec_state, (int)EXEC_SIGNING);
-        tiny_delay((unsigned)info->id, 4);
+            long sale_id = atomic_fetch_add(&ctx->sale_counter, 1) + 1;
+            info->did_ticket = 1;
 
-        info->did_sign = 1;
-        issue_receipt(info, sale_id, stock_after);
-        add_event(ctx, "%s issued receipt", info->worker_thread_name);
+            atomic_store(&info->exec_state, (int)EXEC_SIGNING);
+            tiny_delay((unsigned)info->id, 4);
 
-        atomic_store(&info->exec_state, (int)EXEC_TERMINAL_OK);
-        info->final_result = RESULT_SUCCESS;
-        atomic_fetch_add(&ctx->success_count, 1);
+            info->did_sign = 1;
+            issue_receipt(info, sale_id, stock_after);
+            add_event(ctx, "%s issued receipt", info->worker_thread_name);
+
+            atomic_store(&info->exec_state, (int)EXEC_TERMINAL_OK);
+            info->final_result = RESULT_SUCCESS;
+            atomic_fetch_add(&ctx->success_count, 1);
+        } else {
+            atomic_store(&info->exec_state, (int)EXEC_TERMINAL_FAIL);
+            info->final_result = RESULT_FAILED;
+            info->stock_after = STOCK_NOT_AVAILABLE;
+            add_event(ctx, "%s failed: stock exhausted", info->worker_thread_name);
+            atomic_fetch_add(&ctx->fail_count, 1);
+        }
     } else {
         atomic_store(&info->exec_state, (int)EXEC_TERMINAL_FAIL);
         info->final_result = RESULT_FAILED;
         info->stock_after = STOCK_NOT_AVAILABLE;
+        add_event(ctx, "%s failed: stock exhausted", info->worker_thread_name);
         atomic_fetch_add(&ctx->fail_count, 1);
     }
 
