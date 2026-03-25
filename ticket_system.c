@@ -4,10 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <unistd.h>
 
 #define CLR_RESET   "\x1b[0m"
 #define CLR_RED     "\x1b[31m"
@@ -20,24 +22,13 @@
 #define CLR_BOLD    "\x1b[1m"
 
 #define STOCK_NOT_AVAILABLE (-999999)
+#define MAX_EVENTS 16
 
 /*
  * Local educational signature seed only.
  * This is NOT cryptography and must not be used in real systems.
  */
 #define SECRET_KEY "LAB_ONLY_SECRET_DO_NOT_USE_IN_REAL_SYSTEMS"
-
-typedef enum {
-    ST_CREATED = 0,
-    ST_WAITING,
-    ST_CHECKING,
-    ST_REQUESTING,
-    ST_DECREMENTING,
-    ST_TICKETING,
-    ST_SIGNING,
-    ST_DONE_OK,
-    ST_DONE_FAIL
-} thread_state_t;
 
 typedef struct {
     pthread_mutex_t mutex;
@@ -48,9 +39,14 @@ typedef struct {
 } simple_barrier_t;
 
 typedef struct {
+    long timestamp_ms;
+    char text[128];
+} event_t;
+
+typedef struct {
     int id;
-    atomic_int state;
-    int success;
+    atomic_int exec_state;
+    final_result_t final_result;
     int did_check;
     int did_request;
     int did_decrement;
@@ -77,6 +73,10 @@ typedef struct {
 
     thread_info_t *infos;
     pthread_t *threads;
+    
+    pthread_mutex_t render_lock;
+    event_t events[MAX_EVENTS];
+    int event_head;
 } simulation_ctx_t;
 
 typedef struct {
@@ -141,38 +141,64 @@ static void tiny_delay(unsigned seed, int stage) {
     nanosleep(&ts, NULL);
 }
 
-static const char *state_name(thread_state_t st) {
+static const char *exec_state_name(exec_state_t st) {
     switch (st) {
-        case ST_CREATED: return "CREATED";
-        case ST_WAITING: return "WAITING";
-        case ST_CHECKING: return "CHECKING";
-        case ST_REQUESTING: return "REQUESTING";
-        case ST_DECREMENTING: return "DECR";
-        case ST_TICKETING: return "TICKET";
-        case ST_SIGNING: return "SIGNING";
-        case ST_DONE_OK: return "SUCCESS";
-        case ST_DONE_FAIL: return "FAILED";
-        default: return "UNKNOWN";
+        case EXEC_WAITING: return "WAITING";
+        case EXEC_CHECKING: return "CHECK";
+        case EXEC_REQUESTING: return "REQ";
+        case EXEC_DECREMENTING: return "DECR";
+        case EXEC_TICKETING: return "TICKET";
+        case EXEC_SIGNING: return "SIGN";
+        case EXEC_TERMINAL_OK: return "SUCCESS";
+        case EXEC_TERMINAL_FAIL: return "FAILED";
+        default: return "?";
     }
 }
 
-static const char *state_color(thread_state_t st) {
+static const char *result_name(final_result_t res) {
+    switch (res) {
+        case RESULT_IN_PROGRESS: return "RUNNING";
+        case RESULT_SUCCESS: return "SUCCESS";
+        case RESULT_FAILED: return "FAILED";
+        default: return "?";
+    }
+}
+
+static const char *exec_state_color(exec_state_t st) {
     switch (st) {
-        case ST_CREATED: return CLR_GRAY;
-        case ST_WAITING: return CLR_BLUE;
-        case ST_CHECKING: return CLR_CYAN;
-        case ST_REQUESTING: return CLR_YELLOW;
-        case ST_DECREMENTING: return CLR_RED;
-        case ST_TICKETING: return CLR_MAGENTA;
-        case ST_SIGNING: return CLR_BLUE;
-        case ST_DONE_OK: return CLR_GREEN;
-        case ST_DONE_FAIL: return CLR_RED;
+        case EXEC_WAITING: return CLR_BLUE;
+        case EXEC_CHECKING: return CLR_CYAN;
+        case EXEC_REQUESTING: return CLR_YELLOW;
+        case EXEC_DECREMENTING: return CLR_RED;
+        case EXEC_TICKETING: return CLR_MAGENTA;
+        case EXEC_SIGNING: return CLR_BLUE;
+        case EXEC_TERMINAL_OK: return CLR_GREEN;
+        case EXEC_TERMINAL_FAIL: return CLR_RED;
         default: return CLR_RESET;
     }
 }
 
-static void set_state(thread_info_t *info, thread_state_t st) {
-    atomic_store(&info->state, st);
+static const char *result_color(final_result_t res) {
+    switch (res) {
+        case RESULT_SUCCESS: return CLR_GREEN;
+        case RESULT_FAILED: return CLR_RED;
+        case RESULT_IN_PROGRESS: return CLR_YELLOW;
+        default: return CLR_RESET;
+    }
+}
+
+static void add_event(simulation_ctx_t *ctx, const char *fmt, ...) {
+    pthread_mutex_lock(&ctx->render_lock);
+    int idx = ctx->event_head % MAX_EVENTS;
+    char buf[128];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    strncpy(ctx->events[idx].text, buf, sizeof(ctx->events[idx].text) - 1);
+    ctx->events[idx].text[sizeof(ctx->events[idx].text) - 1] = '\0';
+    ctx->event_head++;
+    pthread_mutex_unlock(&ctx->render_lock);
 }
 
 static void issue_receipt(thread_info_t *info, long sale_id, int stock_after) {
@@ -191,14 +217,6 @@ static void issue_receipt(thread_info_t *info, long sale_id, int stock_after) {
     toy_sign(info->receipt, info->signature);
 }
 
-static const char *format_stock_value(int value, char *buffer, size_t buffer_len) {
-    if (value == STOCK_NOT_AVAILABLE) {
-        return "n/a";
-    }
-    snprintf(buffer, buffer_len, "%d", value);
-    return buffer;
-}
-
 static void *buyer_thread(void *arg) {
     thread_arg_t *targ = (thread_arg_t *)arg;
     simulation_ctx_t *ctx = targ->ctx;
@@ -207,14 +225,15 @@ static void *buyer_thread(void *arg) {
     snprintf(
         info->worker_thread_name,
         sizeof(info->worker_thread_name),
-        "thr-%llu",
-        (unsigned long long)(uintptr_t)pthread_self()
+        "T%05d",
+        info->id
     );
 
-    set_state(info, ST_WAITING);
+    atomic_store(&info->exec_state, (int)EXEC_WAITING);
+    info->final_result = RESULT_IN_PROGRESS;
     barrier_wait(&ctx->start_barrier);
 
-    set_state(info, ST_CHECKING);
+    atomic_store(&info->exec_state, (int)EXEC_CHECKING);
     info->did_check = 1;
     tiny_delay((unsigned)info->id, 1);
 
@@ -231,59 +250,57 @@ static void *buyer_thread(void *arg) {
      */
     int snapshot = atomic_load(&ctx->tickets_remaining);
     info->stock_observed_before = snapshot;
+    add_event(ctx, "%s saw stock %d", info->worker_thread_name, snapshot);
 
-    set_state(info, ST_REQUESTING);
+    atomic_store(&info->exec_state, (int)EXEC_REQUESTING);
     info->did_request = 1;
     tiny_delay((unsigned)info->id, 2);
 
     if (snapshot > 0) {
-        set_state(info, ST_DECREMENTING);
+        atomic_store(&info->exec_state, (int)EXEC_DECREMENTING);
         tiny_delay((unsigned)info->id, 3);
 
         info->did_decrement = 1;
         int stock_after = atomic_fetch_sub(&ctx->tickets_remaining, 1) - 1;
+        add_event(ctx, "%s decremented to %d", info->worker_thread_name, stock_after);
 
-        set_state(info, ST_TICKETING);
+        atomic_store(&info->exec_state, (int)EXEC_TICKETING);
         tiny_delay((unsigned)info->id, 3);
 
         long sale_id = atomic_fetch_add(&ctx->sale_counter, 1) + 1;
         info->did_ticket = 1;
 
-        set_state(info, ST_SIGNING);
+        atomic_store(&info->exec_state, (int)EXEC_SIGNING);
         tiny_delay((unsigned)info->id, 4);
 
-        info->success = 1;
-        issue_receipt(info, sale_id, stock_after);
         info->did_sign = 1;
+        issue_receipt(info, sale_id, stock_after);
+        add_event(ctx, "%s issued receipt", info->worker_thread_name);
+
+        atomic_store(&info->exec_state, (int)EXEC_TERMINAL_OK);
+        info->final_result = RESULT_SUCCESS;
         atomic_fetch_add(&ctx->success_count, 1);
-        set_state(info, ST_DONE_OK);
     } else {
-        info->success = 0;
+        atomic_store(&info->exec_state, (int)EXEC_TERMINAL_FAIL);
+        info->final_result = RESULT_FAILED;
         info->stock_after = STOCK_NOT_AVAILABLE;
         atomic_fetch_add(&ctx->fail_count, 1);
-        set_state(info, ST_DONE_FAIL);
     }
 
     atomic_fetch_add(&ctx->done_count, 1);
     return NULL;
 }
 
-static void count_states(simulation_ctx_t *ctx, int *out, int n) {
-    for (int i = 0; i < n; i++) out[i] = 0;
-
-    for (int i = 0; i < ctx->cfg.threads; i++) {
-        int st = atomic_load(&ctx->infos[i].state);
-        if (st >= 0 && st < n) out[st]++;
-    }
-}
-
-static void print_divider(void) {
-    printf("+--------+----------+-------+-----+-----+-----+-----+-----+----------+-----------------------------------+------------------+\n");
+static void render_progress_bar(int done, int total, int width) {
+    int filled = (done * width) / total;
+    printf("[");
+    for (int i = 0; i < filled; i++) printf("=");
+    for (int i = filled; i < width; i++) printf("-");
+    printf("] %3d%%", (done * 100) / total);
 }
 
 static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
-    int counts[10];
-    count_states(ctx, counts, 10);
+    pthread_mutex_lock(&ctx->render_lock);
 
     int remaining = atomic_load(&ctx->tickets_remaining);
     int sold = atomic_load(&ctx->success_count);
@@ -292,93 +309,93 @@ static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
     int oversold = sold > ctx->cfg.tickets ? sold - ctx->cfg.tickets : 0;
 
     printf("\x1b[H\x1b[J");
-    printf(CLR_BOLD "Ticket Race Simulator (intentionally flawed concurrent mode)" CLR_RESET "\n");
+    printf(CLR_BOLD "=== Ticket Race Simulator (Flawed Concurrent) ===" CLR_RESET "\n\n");
 
-    printf("Tickets iniciais: %d | Threads: %d | Restantes: %d | Vendidos: %d | Falhas: %d | Oversold: %d\n",
-           ctx->cfg.tickets, ctx->cfg.threads, remaining, sold, failed, oversold);
-
-        printf("Estados -> waiting:%d checking:%d request:%d decrement:%d ticket:%d signing:%d success:%d failed:%d | done:%d/%d\n",
-           counts[ST_WAITING], counts[ST_CHECKING], counts[ST_REQUESTING],
-            counts[ST_DECREMENTING], counts[ST_TICKETING], counts[ST_SIGNING],
-            counts[ST_DONE_OK], counts[ST_DONE_FAIL],
-           done, ctx->cfg.threads);
-        printf("Etapas por thread: CHK=verificou estoque | REQ=solicitou compra | DEC=descontou estoque | TKT=gerou ticket | SIG=gerou assinatura\n\n");
+    printf("Progress: ");
+    render_progress_bar(done, ctx->cfg.threads, 30);
+    printf("\n");
+    printf("Tickets: %d initial | Stock: %d | Sold: %d | Failed: %d | Oversold: %d\n\n",
+           ctx->cfg.tickets, remaining, sold, failed, oversold);
 
     if (!final_frame) {
-        print_divider();
-        printf("| Thread | State    | Result | CHK | REQ | DEC | TKT | SIG | Sale ID  | Receipt                           | Signature        |\n");
-        print_divider();
+        printf(CLR_BOLD "THREADS (showing %d of %d):" CLR_RESET "\n", 
+               ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads,
+               ctx->cfg.threads);
+        printf("%-10s %-8s %-9s %-10s %-8s\n", "Thread", "ExecState", "Result", "Sale#", "Stock");
+        printf("%s\n", "---------------------------------------------");
 
         int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
-
         for (int i = 0; i < limit; i++) {
             thread_info_t *info = &ctx->infos[i];
-            thread_state_t st = (thread_state_t)atomic_load(&info->state);
-            const char *color = state_color(st);
-            const char *result = info->success ? "OK" : (st == ST_DONE_FAIL ? "NO" : "...");
+            exec_state_t st = (exec_state_t)atomic_load(&info->exec_state);
+            const char *st_color = exec_state_color(st);
+            const char *res_color = result_color(info->final_result);
+            char sale_str[16] = "-";
+            char stock_str[16] = "-";
+            
+            if (info->sale_id > 0) snprintf(sale_str, sizeof(sale_str), "%ld", info->sale_id);
+            if (info->stock_observed_before != STOCK_NOT_AVAILABLE) {
+                snprintf(stock_str, sizeof(stock_str), "%d", info->stock_after);
+            }
 
-            printf("| %sT%-5d%s | %s%-8s%s | %-6s |  %c  |  %c  |  %c  |  %c  |  %c  | %-8ld | %-33.33s | %-16.16s |\n",
-                   CLR_BOLD, info->id, CLR_RESET,
-                   color, state_name(st), CLR_RESET,
-                   result,
-                   info->did_check ? 'Y' : '-',
-                   info->did_request ? 'Y' : '-',
-                   info->did_decrement ? 'Y' : '-',
-                   info->did_ticket ? 'Y' : '-',
-                   info->did_sign ? 'Y' : '-',
-                   info->sale_id,
-                   info->receipt[0] ? info->receipt : "-",
-                   info->signature[0] ? info->signature : "-");
+            printf("%s%-10s%s %s%-8s%s %s%-9s%s %10s %8s\n",
+                   CLR_BOLD, info->worker_thread_name, CLR_RESET,
+                   st_color, exec_state_name(st), CLR_RESET,
+                   res_color, result_name(info->final_result), CLR_RESET,
+                   sale_str, stock_str);
         }
 
-        print_divider();
+        printf("\n" CLR_BOLD "Recent events:" CLR_RESET "\n");
+        int start = (ctx->event_head >= MAX_EVENTS) ? (ctx->event_head - MAX_EVENTS) : 0;
+        for (int i = start; i < ctx->event_head; i++) {
+            int idx = i % MAX_EVENTS;
+            if (ctx->events[idx].text[0]) {
+                printf("  %s\n", ctx->events[idx].text);
+            }
+        }
     }
 
     if (final_frame) {
-        printf("\n%s\n", "-----------------------------------------------------------------");
-        printf(" RESULT OF THE OPERATION: FLAWED_CONCURRENT\n");
-        printf("%s\n", "-----------------------------------------------------------------");
-        printf(" Buyers triggered         : %d\n", ctx->cfg.threads);
-        printf(" Successful purchases     : %d\n", sold);
-        printf(" Failed/Rejected attempts : %d\n", failed);
-        if (oversold > 0) {
-            printf(" OVERSOLD IN THIS BATCH   : %d tickets!\n", oversold);
+        printf("\n" CLR_BOLD "=== FINAL REPORT ===" CLR_RESET "\n");
+        printf("Buyers:           %d\n", ctx->cfg.threads);
+        printf("Successful:       %d\n", sold);
+        printf("Failed/Rejected:  %d\n", failed);
+        printf("Oversold:         %d\n", oversold);
+        printf("Remaining stock:  %d\n", remaining);
+
+        printf("\n" CLR_BOLD "Invariant Checks:" CLR_RESET "\n");
+
+        int success_actual = 0, fail_actual = 0;
+        for (int i = 0; i < ctx->cfg.threads; i++) {
+            if (ctx->infos[i].final_result == RESULT_SUCCESS) success_actual++;
+            if (ctx->infos[i].final_result == RESULT_FAILED) fail_actual++;
         }
-        printf(" Current remaining stock  : %d\n", remaining);
 
-        printf("%s\n", "-----------------------------------------------------------------");
-        printf(" DETAILED BUYER ACTIVITY\n");
-        printf("%s\n", "-----------------------------------------------------------------");
-        printf("%-10s %-16s %-10s %-12s %-11s\n",
-               "Buyer", "Thread", "Saw stock", "Proof Token", "Stock after");
-        printf("%s\n", "-----------------------------------------------------------------");
-
-        int limit = ctx->cfg.rows_to_show < ctx->cfg.threads ? ctx->cfg.rows_to_show : ctx->cfg.threads;
-        for (int i = 0; i < limit; i++) {
-            thread_info_t *attempt = &ctx->infos[i];
-            char buyer_id[16];
-            char saw_stock[16];
-            char stock_after_text[16];
-            char token[13];
-
-            snprintf(buyer_id, sizeof(buyer_id), "B%05d", attempt->id);
-            if (attempt->signature[0]) {
-                memcpy(token, attempt->signature, 12);
-                token[12] = '\0';
-            } else {
-                strcpy(token, "-");
+        int inv_success = (success_actual == sold);
+        int inv_failed = (fail_actual == failed);
+        int inv_done = (done == sold + failed);
+        int inv_sigs = 1;
+        for (int i = 0; i < ctx->cfg.threads; i++) {
+            if (ctx->infos[i].signature[0] && ctx->infos[i].final_result != RESULT_SUCCESS) {
+                inv_sigs = 0;
+                break;
             }
-
-            printf("%-10s %-16s %-10s %-12s %-11s\n",
-                   buyer_id,
-                   attempt->worker_thread_name,
-                   format_stock_value(attempt->stock_observed_before, saw_stock, sizeof(saw_stock)),
-                   token,
-                   format_stock_value(attempt->stock_after, stock_after_text, sizeof(stock_after_text)));
         }
-        printf("%s\n", "-----------------------------------------------------------------");
+        int inv_sales = 1;
+        for (int i = 0; i < ctx->cfg.threads; i++) {
+            if (ctx->infos[i].sale_id > 0 && ctx->infos[i].final_result != RESULT_SUCCESS) {
+                inv_sales = 0;
+                break;
+            }
+        }
 
-        printf("\nResumo final:\n");
+        printf("  success_count == RESULT_SUCCESS threads: %s\n", inv_success ? CLR_GREEN "PASS" CLR_RESET : CLR_RED "FAIL" CLR_RESET);
+        printf("  fail_count == RESULT_FAILED threads:    %s\n", inv_failed ? CLR_GREEN "PASS" CLR_RESET : CLR_RED "FAIL" CLR_RESET);
+        printf("  done == sum of SUCCESS+FAILED:          %s\n", inv_done ? CLR_GREEN "PASS" CLR_RESET : CLR_RED "FAIL" CLR_RESET);
+        printf("  signatures only for SUCCESS:           %s\n", inv_sigs ? CLR_GREEN "PASS" CLR_RESET : CLR_RED "FAIL" CLR_RESET);
+        printf("  sale_ids only for SUCCESS:             %s\n", inv_sales ? CLR_GREEN "PASS" CLR_RESET : CLR_RED "FAIL" CLR_RESET);
+
+        printf("\n" CLR_BOLD "Resumo final:" CLR_RESET "\n");
         printf(" Threads: %d\n", ctx->cfg.threads);
         printf(" Compras: %d\n", sold);
         printf(" Oversold: %d\n", oversold);
@@ -387,6 +404,35 @@ static void render_dashboard(simulation_ctx_t *ctx, int final_frame) {
     }
 
     fflush(stdout);
+    pthread_mutex_unlock(&ctx->render_lock);
+}
+
+int show_interactive_menu(sim_config_t *cfg) {
+    printf("\n" CLR_BOLD "=== Ticket Race Simulator ===" CLR_RESET "\n");
+    printf("Configure simulation parameters:\n\n");
+    
+    printf("Tickets: ");
+    fflush(stdout);
+    if (scanf("%d", &cfg->tickets) != 1 || cfg->tickets <= 0) {
+        cfg->tickets = 10;
+    }
+    
+    printf("Threads: ");
+    fflush(stdout);
+    if (scanf("%d", &cfg->threads) != 1 || cfg->threads <= 0) {
+        cfg->threads = 10;
+    }
+    
+    printf("Display rows (0=all): ");
+    fflush(stdout);
+    if (scanf("%d", &cfg->rows_to_show) != 1 || cfg->rows_to_show < 0) {
+        cfg->rows_to_show = 0;
+    }
+    if (cfg->rows_to_show == 0) cfg->rows_to_show = cfg->threads;
+    
+    printf("\nStarting simulation...\n\n");
+    sleep(1);
+    return 0;
 }
 
 int run_simulation(const sim_config_t *cfg) {
@@ -398,6 +444,8 @@ int run_simulation(const sim_config_t *cfg) {
     simulation_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.cfg = *cfg;
+
+    pthread_mutex_init(&ctx.render_lock, NULL);
 
     atomic_init(&ctx.tickets_remaining, cfg->tickets);
     atomic_init(&ctx.success_count, 0);
@@ -417,13 +465,14 @@ int run_simulation(const sim_config_t *cfg) {
         free(ctx.threads);
         free(args);
         barrier_destroy(&ctx.start_barrier);
+        pthread_mutex_destroy(&ctx.render_lock);
         return 1;
     }
 
     for (int i = 0; i < cfg->threads; i++) {
         ctx.infos[i].id = i + 1;
-        atomic_init(&ctx.infos[i].state, ST_CREATED);
-        ctx.infos[i].success = 0;
+        atomic_init(&ctx.infos[i].exec_state, (int)EXEC_WAITING);
+        ctx.infos[i].final_result = RESULT_IN_PROGRESS;
         ctx.infos[i].did_check = 0;
         ctx.infos[i].did_request = 0;
         ctx.infos[i].did_decrement = 0;
@@ -470,6 +519,7 @@ int run_simulation(const sim_config_t *cfg) {
     free(ctx.threads);
     free(args);
     barrier_destroy(&ctx.start_barrier);
+    pthread_mutex_destroy(&ctx.render_lock);
 
     return 0;
 }
